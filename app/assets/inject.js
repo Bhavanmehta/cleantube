@@ -164,6 +164,31 @@
     });
   } catch (e) {}
 
+  // Some TVs have no AV1 hardware decoder the web view can use, so it decodes AV1 on the
+  // CPU with dav1d. Measured on a Fire TV (Fire OS 7, web view 138): four dav1d threads
+  // took about 2.5 of 4 cores at 1080p and playback hung, while the TV's own VP9 decoder
+  // played the same video at under half a core. Ask the web view once whether AV1 is
+  // power efficient (hardware); if not, refuse AV1 so YouTube sends VP9 or H.264.
+  // The answer is kept in localStorage, because YouTube can check formats before the
+  // question resolves on a first launch.
+  var AV1_KEY = '__ctAv1Software';
+  var av1Software = false;
+  try { av1Software = localStorage.getItem(AV1_KEY) === '1'; } catch (e) {}
+  if (navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo) {
+    try {
+      navigator.mediaCapabilities.decodingInfo({
+        type: 'media-source',
+        video: {
+          contentType: 'video/mp4; codecs="av01.0.08M.08"',
+          width: 1920, height: 1080, bitrate: 4000000, framerate: 30
+        }
+      }).then(function (r) {
+        av1Software = !!r.supported && !r.powerEfficient;
+        try { localStorage.setItem(AV1_KEY, av1Software ? '1' : '0'); } catch (e) {}
+      }, function () {});
+    } catch (e) {}
+  }
+
   // YouTube's TV player tests the format check with impossible values (width=99999,
   // framerate=9999, eotf=catavision, ...). A real TV app says no to those. The web view
   // ignores the extra values and says yes to everything, so YouTube stops trusting it
@@ -198,6 +223,7 @@
         }
         // 10-bit codecs are YouTube's HDR streams; they stutter badly in the web view.
         if (/vp09\.0[23]\.|vp09\.\d\d\.\d\d\.1[02]|av01\.\d\.\d\d[MH]\.1[02]/i.test(type)) return false;
+        if (av1Software && /av01/i.test(type)) return false;
         return origIsType.call(this, plain.join(';'));
       } catch (e) {
         return origIsType.apply(this, arguments);
@@ -214,6 +240,9 @@
     var origDecodingInfo = mediaCaps.decodingInfo;
     mediaCaps.decodingInfo = function (config) {
       var v = config && config.video;
+      if (av1Software && v && /av01/i.test(String(v.contentType || ''))) {
+        return Promise.resolve({ supported: false, smooth: false, powerEfficient: false, configuration: config });
+      }
       var heavy = v && (v.framerate > 30 ? v.height > 1080 : v.height > 2160);
       return origDecodingInfo.apply(this, arguments).then(function (r) {
         if (!heavy || !r.supported) return r;
